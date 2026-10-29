@@ -337,9 +337,9 @@ function doAutoSync(){
  syncing=true;setSyncStat('⟳ đang đồng bộ…','#fff');
  serverCall({action:'pushScope',u:session.u,hash:session.cred,payload:scopePayload(false)})
   .then(function(j){syncing=false;
-    if(j&&j.ok){setSyncStat('✓ đã đồng bộ','#bfead0');}else{setSyncStat('⚠ lỗi đồng bộ','#ffc9c9');}
+    if(j&&j.ok){lastSyncErr='';setSyncStat('✓ đã đồng bộ','#bfead0');}else{lastSyncErr=(j&&j.error)||'không rõ';setSyncStat('⚠ lỗi đồng bộ: '+shortErr(lastSyncErr),'#ffc9c9');}
     if(syncPending){syncPending=false;scheduleAutoSync();}})
-  .catch(function(){syncing=false;setSyncStat('⚠ chưa đồng bộ (chờ mạng)','#ffc9c9');});
+  .catch(function(e){syncing=false;lastSyncErr=(e&&e.message)||'không rõ';setSyncStat('⚠ chưa đồng bộ: '+shortErr(lastSyncErr),'#ffc9c9');});
 }
 var cfg=JSON.parse(store.get('imv2_cfg')||'{}');
 if(!cfg.gasUrl&&APP_CONFIG.gasUrl){cfg.gasUrl=APP_CONFIG.gasUrl;}
@@ -387,7 +387,20 @@ function showApp(){
 }
 $('#loginBtn').addEventListener('click',doLogin);
 $('#lp').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
-function serverCall(payload){payload.token=cfg.gasToken||'';return fetch(cfg.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)}).then(function(r){return r.json()})}
+var lastSyncErr='';
+function serverCall(payload){payload.token=cfg.gasToken||'';
+ var ctl=(typeof AbortController!=='undefined')?new AbortController():null,tm=null,timedOut=false;
+ if(ctl)tm=setTimeout(function(){timedOut=true;ctl.abort()},60000);
+ return fetch(cfg.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload),signal:ctl?ctl.signal:undefined})
+  .then(function(r){if(tm)clearTimeout(tm);
+   if(!r.ok)throw new Error('máy chủ báo lỗi HTTP '+r.status);
+   return r.text().then(function(t){try{return JSON.parse(t)}catch(e){throw new Error('máy chủ trả dữ liệu không đọc được (mạng công ty chặn hoặc Google quá tải)')}})})
+  .catch(function(e){if(tm)clearTimeout(tm);
+   if(timedOut)throw new Error('quá 60 giây không có phản hồi (mạng chậm hoặc bị chặn)');
+   if(e&&e.name==='TypeError')throw new Error('không kết nối được (mất mạng hoặc mạng chặn script.google.com)');
+   throw e})}
+function shortErr(m){m=String(m||'không rõ');return m.length>60?m.slice(0,57)+'…':m}
+document.addEventListener('click',function(ev){if(ev.target&&ev.target.id==='syncStat'&&lastSyncErr)alert('Lý do lỗi gần nhất:\n'+lastSyncErr+'\n\nNếu lỗi lặp lại, chụp màn hình này gửi P&C.')});
 function doLogin(){
  var u=$('#lu').value.trim(),p=$('#lp').value;$('#lerr').textContent='';
  sha(p).then(function(h){
@@ -913,18 +926,22 @@ function mergeMonths(dbEvals,ms){var mset={};ms.forEach(function(m){mset[m]=1});
  Object.keys(DB.evals||{}).forEach(function(k){if(mset[k.split('|')[0]])delete DB.evals[k]});
  Object.keys(dbEvals||{}).forEach(function(k){DB.evals[k]=dbEvals[k]});}
 function pullScope(cb,silent,months){
- if(!cfg.gasUrl){if(!silent)alert('Chưa kết nối máy chủ.');if(cb)cb(false);return}
+ if(!cfg.gasUrl){if(!silent)alert('Chưa kết nối máy chủ.');if(cb)cb(false,'chưa kết nối máy chủ');return}
  var ms=months||[curMonth()||nowMonth()];
  serverCall({action:'getScope',u:session.u,hash:session.cred,months:ms})
-  .then(function(j){if(j&&j.ok&&j.db){DB.users=j.db.users||[];DB.workers=j.db.workers||[];DB.depts=j.db.depts||[];DB.submissions=j.db.submissions||[];if(!DB.evals)DB.evals={};mergeMonths(j.db.evals,ms);suspendSync=true;saveDB();suspendSync=false;buildDeptSelectors();renderAll();renderRoll();if(session.role==='manager')renderManage();if(cb)cb(true)}else{if(!silent)alert('Lỗi: '+((j&&j.error)||'không có dữ liệu'));if(cb)cb(false)}})
-  .catch(function(e){if(!silent)alert('Không kết nối được: '+e.message);if(cb)cb(false)})}
+  .then(function(j){
+   if(!(j&&j.ok&&j.db)){var why=(j&&j.error)||'không có dữ liệu';if(!silent)alert('Lỗi: '+why);if(cb)cb(false,why);return}
+   try{DB.users=j.db.users||[];DB.workers=j.db.workers||[];DB.depts=j.db.depts||[];DB.submissions=j.db.submissions||[];if(!DB.evals)DB.evals={};mergeMonths(j.db.evals,ms);suspendSync=true;saveDB();suspendSync=false;buildDeptSelectors();renderAll();renderRoll();if(session.role==='manager')renderManage()}
+   catch(e){suspendSync=false;if(!silent)alert('Đã tải xong nhưng lỗi hiển thị: '+e.message);if(cb)cb(false,'lỗi hiển thị/lưu trên máy: '+e.message);return}
+   if(cb)cb(true)})
+  .catch(function(e){if(!silent)alert('Không tải được: '+e.message);if(cb)cb(false,e.message)})}
 function fetchMonths(ms,cb){ // chỉ nạp thêm eval của các tháng cần, không dựng lại toàn bộ
  if(!cfg.gasUrl||!session){if(cb)cb();return}
  serverCall({action:'getScope',u:session.u,hash:session.cred,months:ms})
   .then(function(j){if(j&&j.ok&&j.db){if(!DB.evals)DB.evals={};mergeMonths(j.db.evals,ms);suspendSync=true;saveDB();suspendSync=false;}if(cb)cb()})
   .catch(function(){if(cb)cb()})}
 function refreshFromServer(silent){if(!cfg.gasUrl||!session)return;
- var go=function(){setSyncStat('⟳ đang tải mới…','#fff');pullScope(function(ok){setSyncStat(ok?'✓ đã cập nhật':'⚠ chưa tải được','#bfead0');},silent!==false);};
+ var go=function(){setSyncStat('⟳ đang tải mới…','#fff');pullScope(function(ok,why){lastSyncErr=ok?'':(why||'không rõ');setSyncStat(ok?'✓ đã cập nhật':'⚠ chưa tải được: '+shortErr(why),ok?'#bfead0':'#ffc9c9');},silent!==false);};
  if(syncTimer||syncing){if(syncTimer){clearTimeout(syncTimer);syncTimer=null;}pushScope(function(){go();});}
  else go();}
 $('#pushBtn').addEventListener('click',function(){cfg.gasUrl=$('#gasUrl').value.trim();cfg.gasToken=$('#gasToken').value.trim();saveCfg();
